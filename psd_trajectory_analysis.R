@@ -65,8 +65,6 @@
 #   plot_SSS_HAMD.png
 #   plot_Pooled_HAMD.png
 #   plot_Pooled_GDS.png
-#   plot_forest_HAMD.png
-#   plot_forest_GDS.png
 # =============================================================================
 
 
