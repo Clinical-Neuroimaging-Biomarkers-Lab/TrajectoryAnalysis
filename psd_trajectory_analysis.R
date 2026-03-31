@@ -1431,105 +1431,137 @@ cat("Saved: bch_results_pooled_GDS.csv\n")
 
 
 # =============================================================================
-# 12.  FOREST PLOTS — BCH Regression Results (Figure 4)
+# 12.  SUPPLEMENTARY EXTENDED BCH REGRESSION — Pooled HAMD (EpiUSA + SSS)
 #
-# Coefficient estimates, 95% CIs, and p-values taken directly from the
-# BCH regression models above and hard-coded here for reproducible plotting.
+# Extends the primary BCH regression by adding stroke-related predictors.
+# Conducted for pooled HAMD only — stroke characteristics unavailable in PSS
+# and incomplete in EpiUSA and SSS, reducing the analytic sample to n=473.
+#
+# Additional predictors:
+#   - Prior stroke (yes vs no)
+#   - Stroke type (TIA vs Ischaemic; reference)
+#   - Lesion location (Left/Infratentorial vs Right; reference)
+#   - Stroke subtype (Small vessel/Cardioembolic/Undetermined/Other
+#                     vs Large artery; reference)
+#
+# Note: Stroke type (TIA) could not be estimated — TIA occurred exclusively
+#       in SSS, rendering it collinear with cohort.
+#
+# Requires: pool_lcga_3, pooled, master_PSD_dataset_n750.csv
 # =============================================================================
 
-# ── Shared plot elements ───────────────────────────────────────────────────────
-predictor_levels <- rev(c("Age", "Sex (female)", "Hypertension", "Diabetes",
-                           "Global cognition (z)", "Cohort"))
+library(broom)
 
-forest_theme <- theme_bw(base_size = 22) +
-  theme(
-    panel.grid.major   = element_blank(),
-    panel.grid.minor   = element_blank(),
-    strip.background   = element_rect(fill = "white"),
-    strip.text         = element_text(colour = "black", face = "bold", size = 20),
-    legend.position    = "bottom",
-    legend.title       = element_blank(),
-    legend.box.spacing = unit(2, "pt"),
-    axis.text.y        = element_text(size = 20)
+# ── Load master dataset with stroke characteristics ───────────────────────────
+# master_n750 must include lesion_location, strokesubtype, stroke_prior
+# (created by the data preparation script)
+master_n750 <- read.csv(data_path("master_PSD_dataset_n750.csv"),
+                         stringsAsFactors = FALSE)
+
+# ── Prepare extended predictor dataset ───────────────────────────────────────
+pooled$cohort <- as.integer(pooled$study == "SSS")   # 0 = EpiUSA, 1 = SSS
+pooled$id_int <- as.integer(factor(pooled$patient_id))
+
+baseline_ext <- pooled %>%
+  group_by(id_int) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(id_int, patient_id, study, age, sex, hypertension, diabetes,
+         zglobal, cohort) %>%
+  left_join(
+    master_n750 %>% select(patient_id, stroke_prior, stroketype,
+                            lesion_location, strokesubtype),
+    by = "patient_id"
+  ) %>%
+  mutate(
+    sex_female        = as.integer(sex == "female"),
+    hypertension      = as.integer(hypertension == 1 | hypertension == TRUE),
+    diabetes          = as.integer(diabetes == 1 | diabetes == TRUE),
+    stroke_prior      = as.integer(stroke_prior == "Yes"),
+    # Stroke type: TIA vs Ischaemic (reference)
+    # NOTE: collinear with cohort (TIA = SSS only) — will produce NA in model
+    stroke_TIA        = as.integer(stroketype == "TIA"),
+    # Lesion location: reference = Right hemisphere
+    lesion_Left       = as.integer(lesion_location == "Left"),
+    lesion_Infra      = as.integer(lesion_location == "Infratentorial"),
+    # Stroke subtype: reference = Large artery
+    sub_SmallVessel   = as.integer(strokesubtype == "Small vessel"),
+    sub_Cardioembolic = as.integer(strokesubtype == "Cardioembolic"),
+    sub_Undetermined  = as.integer(strokesubtype == "Undetermined"),
+    sub_Other         = as.integer(strokesubtype == "Other")
   )
 
-sig_colours <- c("p < .05" = "#2E86C1", "ns" = "grey60")
-sig_sizes   <- c("p < .05" = 4.0,       "ns" = 3.0)
-sig_shapes  <- c("p < .05" = 16,         "ns" = 1)
+cat("Complete cases on extended predictor set:\n")
+cat("  n =", sum(complete.cases(baseline_ext %>%
+      select(age, sex_female, hypertension, diabetes, zglobal, cohort,
+             stroke_prior, stroke_TIA, lesion_Left, lesion_Infra,
+             sub_SmallVessel, sub_Cardioembolic, sub_Undetermined,
+             sub_Other))),
+    "of", nrow(baseline_ext), "\n")
 
-make_forest <- function(df, title, xlims) {
-  ggplot(df, aes(x = est, y = predictor, colour = sig, shape = sig, size = sig)) +
-    geom_vline(xintercept = 0, linetype = "dashed", colour = "black", linewidth = 0.8) +
-    geom_errorbar(aes(xmin = lo, xmax = hi),
-                  width = 0.25, linewidth = 0.8, orientation = "y") +
-    geom_point() +
-    facet_wrap(~ contrast, ncol = 2) +
-    scale_colour_manual(values = sig_colours, breaks = c("p < .05", "ns")) +
-    scale_shape_manual(values  = sig_shapes,  breaks = c("p < .05", "ns")) +
-    scale_size_manual(values   = sig_sizes,   breaks = c("p < .05", "ns")) +
-    scale_x_continuous(limits = xlims) +
-    labs(x = expression(paste("BCH-weighted ", beta, " coefficient (95% CI)")),
-         y = NULL, title = title) +
-    forest_theme
+# ── Recompute BCH weights for pooled HAMD ─────────────────────────────────────
+# (recompute here in case environment was restarted)
+pprob_hamd_ext <- pool_lcga_3$pprob %>% select(id_int, class)
+P_hamd_ext     <- as.matrix(pool_lcga_3$pprob[, c("prob1", "prob2", "prob3")])
+C_hamd_ext     <- matrix(0, nrow = 3, ncol = 3)
+for (j in 1:3) {
+  C_hamd_ext[j, ] <- colMeans(P_hamd_ext[pprob_hamd_ext$class == j, ])
 }
+W_hamd_ext           <- P_hamd_ext %*% solve(C_hamd_ext)
+W_hamd_ext[W_hamd_ext < 0] <- 0
+colnames(W_hamd_ext) <- c("bch1", "bch2", "bch3")
+bch_df_ext <- cbind(pprob_hamd_ext %>% select(id_int, class),
+                    as.data.frame(W_hamd_ext))
 
-# ── Pooled HAMD forest data ────────────────────────────────────────────────────
-hamd_forest <- data.frame(
-  predictor = rep(c("Age", "Sex (female)", "Hypertension", "Diabetes",
-                    "Global cognition (z)", "Cohort"), 2),
-  contrast  = rep(c("Mild Remitting\nvs No Depression",
-                    "Moderate Improving\nvs No Depression"), each = 6),
-  est = c(-0.003, -0.009,  0.017,  0.002,  0.017,  0.013,
-          -0.003,  0.137, -0.046, -0.020,  0.008, -0.077),
-  lo  = c(-0.006, -0.055, -0.032, -0.048,  0.001, -0.037,
-          -0.007,  0.065, -0.120, -0.098, -0.016, -0.161),
-  hi  = c( 0.000,  0.037,  0.066,  0.051,  0.033,  0.063,
-           0.000,  0.208,  0.029,  0.058,  0.033,  0.007),
-  p   = c(0.052, 0.690, 0.500, 0.949, 0.032, 0.604,
-          0.086, 0.001, 0.229, 0.620, 0.513, 0.071)
-) %>%
-  mutate(
-    sig       = ifelse(p < .05, "p < .05", "ns"),
-    predictor = factor(predictor, levels = predictor_levels)
-  )
+# ── Merge BCH weights with extended predictor data ────────────────────────────
+reg_data_ext <- bch_df_ext %>% left_join(baseline_ext, by = "id_int")
 
-# ── Pooled GDS forest data ─────────────────────────────────────────────────────
-gds_forest <- data.frame(
-  predictor = rep(c("Age", "Sex (female)", "Hypertension", "Diabetes",
-                    "Global cognition (z)", "Cohort"), 2),
-  contrast  = rep(c("Mild Remitting\nvs No Depression",
-                    "Moderate Persistent\nvs No Depression"), each = 6),
-  est = c(-0.003, -0.121, -0.002, -0.007,  0.061,  0.121,
-           0.010, -0.050,  0.125,  0.212, -0.011,  0.024),
-  lo  = c(-0.010, -0.249, -0.126, -0.158,  0.029, -0.010,
-           0.003, -0.160,  0.007,  0.088, -0.045, -0.092),
-  hi  = c( 0.004,  0.006,  0.122,  0.145,  0.094,  0.251,
-           0.016,  0.060,  0.244,  0.335,  0.023,  0.141),
-  p   = c(0.379, 0.061, 0.975, 0.930, 0.001, 0.069,
-          0.004, 0.372, 0.039, 0.001, 0.529, 0.684)
-) %>%
-  mutate(
-    sig       = ifelse(p < .05, "p < .05", "ns"),
-    predictor = factor(predictor, levels = predictor_levels)
-  )
-
-plot_forest_hamd <- make_forest(
-  hamd_forest,
-  "Pooled HAMD: Predictors of trajectory class (EpiUSA + SSS)",
-  xlims = c(-0.22, 0.27)
+# ── BCH: Class 2 (Mild Remitting) vs Class 1 (No Depression) ─────────────────
+cat("\n--- Extended BCH: Class 2 (Mild Remitting) vs Class 1 ---\n")
+bch_ext_c2v1 <- lm(
+  bch2 ~ age + sex_female + hypertension + diabetes + zglobal + cohort +
+         stroke_prior + stroke_TIA +
+         lesion_Left + lesion_Infra +
+         sub_SmallVessel + sub_Cardioembolic + sub_Undetermined + sub_Other,
+  data    = reg_data_ext,
+  weights = (bch1 + bch2)
 )
+summary(bch_ext_c2v1)
 
-plot_forest_gds <- make_forest(
-  gds_forest,
-  "Pooled GDS: Predictors of trajectory class (PSS + SSS)",
-  xlims = c(-0.30, 0.42)
+# ── BCH: Class 3 (Moderate Improving) vs Class 1 (No Depression) ─────────────
+cat("\n--- Extended BCH: Class 3 (Moderate Improving) vs Class 1 ---\n")
+bch_ext_c3v1 <- lm(
+  bch3 ~ age + sex_female + hypertension + diabetes + zglobal + cohort +
+         stroke_prior + stroke_TIA +
+         lesion_Left + lesion_Infra +
+         sub_SmallVessel + sub_Cardioembolic + sub_Undetermined + sub_Other,
+  data    = reg_data_ext,
+  weights = (bch1 + bch3)
 )
+summary(bch_ext_c3v1)
 
-ggsave(out_path("plot_forest_HAMD.png"), plot_forest_hamd,
-       width = 11, height = 6, dpi = 300)
-ggsave(out_path("plot_forest_GDS.png"),  plot_forest_gds,
-       width = 11, height = 6, dpi = 300)
-cat("Forest plots saved.\n")
+# ── Format and export results ──────────────────────────────────────────────────
+res_ext <- bind_rows(
+  format_bch(bch_ext_c2v1, "Class 2 (Mild Remitting) vs Class 1 (No Depression)"),
+  format_bch(bch_ext_c3v1, "Class 3 (Moderate Improving) vs Class 1 (No Depression)")
+) %>%
+  mutate(term = recode(term,
+    stroke_prior      = "Prior stroke",
+    stroke_TIA        = "Stroke type (TIA vs Ischaemic)",
+    lesion_Left       = "Lesion location (Left vs Right)",
+    lesion_Infra      = "Lesion location (Infratentorial vs Right)",
+    sub_SmallVessel   = "Subtype (Small vessel vs Large artery)",
+    sub_Cardioembolic = "Subtype (Cardioembolic vs Large artery)",
+    sub_Undetermined  = "Subtype (Undetermined vs Large artery)",
+    sub_Other         = "Subtype (Other vs Large artery)"
+  ))
+
+cat("\n=== SUPPLEMENTARY: Extended BCH Regression Results ===\n")
+print(as.data.frame(res_ext %>% select(contrast, term, result)), row.names = FALSE)
+
+write.csv(res_ext, out_path("bch_results_supplementary.csv"), row.names = FALSE)
+cat("Saved: bch_results_supplementary.csv\n")
+
 
 cat("\n\nAll analyses complete.\n")
-cat("Output files written to: ", OUT_DIR, "\n")
+cat("Output files written to:", OUT_DIR, "\n")
